@@ -10,8 +10,9 @@
     },
     "model": {
         "name": "nmmr",
-        "n_epochs": 3,
-        "batch_size": 250,
+        "n_epochs": 30,
+        "batch_size": 500,
+        "n_folds": 5,
         "log_metrics": "False",
         "learning_rate": 0.003,
         "l2_penalty": 3e-06,

@@ -1,4 +1,5 @@
 from src.models.NMMR.kernel_utils import calculate_kernel_matrix_batched
+from src.models.NMMR.mar_imputer import imputed_residual
 
 
 def NMMR_loss(model_output, target, kernel_matrix, loss_name: str):  # batch_indices=None):
@@ -13,6 +14,32 @@ def NMMR_loss(model_output, target, kernel_matrix, loss_name: str):  # batch_ind
     elif loss_name == "V_statistic":
         # calculate V statistic (see Serfling 1980)
         loss = (residual.T @ K @ residual) / (n ** 2)
+    else:
+        raise ValueError(f"{loss_name} is not valid. Must be 'U_statistic' or 'V_statistic'.")
+
+    return loss[0, 0]
+
+
+def NMMR_loss_mar(model_output, target, delta_w, mar_weights, kernel_matrix, loss_name: str):
+    """MAR-imputed U-/V-statistic loss (paper §4.4).
+
+    R̂_MAR(θ) = (1 / N) · Σ_{i,j} r̃_i · r̃_j · k(L_i, L_j)
+
+    where r̃_i = δ_i · r_i + (1 − δ_i) · Σ_j W[i,j] · r_j and N is
+    n(n−1) for the U-statistic (diagonal zeroed) or n² for the V-statistic.
+
+    Reduces exactly to the upstream NMMR_loss when δ ≡ 1.
+    """
+    residual = target - model_output
+    r_tilde = imputed_residual(residual, delta_w, mar_weights)
+    n = r_tilde.shape[0]
+    K = kernel_matrix
+
+    if loss_name == "U_statistic":
+        K.fill_diagonal_(0)
+        loss = (r_tilde.T @ K @ r_tilde) / (n * (n - 1))
+    elif loss_name == "V_statistic":
+        loss = (r_tilde.T @ K @ r_tilde) / (n ** 2)
     else:
         raise ValueError(f"{loss_name} is not valid. Must be 'U_statistic' or 'V_statistic'.")
 

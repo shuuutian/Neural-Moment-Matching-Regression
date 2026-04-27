@@ -9,10 +9,11 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from src.data.ate.data_class import PVTrainDataSetTorch, PVTestDataSetTorch, RHCTestDataSet
-from src.data.ate.data_class_mar import PVTrainDataSetMARTorch
-from src.models.NMMR.NMMR_loss import NMMR_loss, NMMR_loss_batched
+from src.data.ate.data_class_mar import PVTrainDataSetMARTorch, create_k_folds
+from src.models.NMMR.NMMR_loss import NMMR_loss, NMMR_loss_batched, NMMR_loss_mar
 from src.models.NMMR.NMMR_model import MLP_for_NMMR, cnn_for_dsprite
 from src.models.NMMR.kernel_utils import calculate_kernel_matrix, calculate_kernel_matrix_batched, rbf_kernel
+from src.models.NMMR.mar_imputer import precompute_nw_weights
 
 
 class NMMR_Trainer_RHCExperiment:
@@ -231,14 +232,20 @@ class NMMR_Trainer_DemandExperiment(object):
 class NMMR_Trainer_DemandMARExperiment(object):
     """MAR-aware NMMR trainer for the PCI demand DGP.
 
-    Pass 1 placeholder behaviour: ignores ``delta_w`` and runs the upstream
-    NMMR loss / Monte-Carlo ATE plug-in on whatever ``outcome_proxy`` is
-    handed over. The MAR-imputed loss (paper §4.4) lands in Pass 2; the
-    MAR-aware ATE estimator lands in Pass 3.
+    Two training paths gated by ``train_params["use_mar_modified"]``:
 
-    Honours an optional ``model_config["use_mar_modified"]`` flag to make
-    the placeholder vs MAR-aware branch explicit, but in Pass 1 both
-    branches behave identically.
+      * False (Pass 1 placeholder, used by ``baseline`` and ``oracle_baseline``
+        roles): minibatched upstream NMMR loss; ``delta_w`` is ignored.
+
+      * True (Pass 2, used by ``oracle_modified`` and ``modified`` roles):
+        full-batch SGD with the MAR-imputed U-statistic loss
+        (``NMMR_loss_mar``). At ``train()`` start we precompute the cross-fit
+        Nadaraya-Watson weight matrix on L⁺ = (A, Z, Y) once; the per-step
+        imputation is then a single matrix-vector product. Reduces exactly to
+        the upstream loss when δ ≡ 1.
+
+    The MAR-aware ATE estimator (paper §4.4) lands in Pass 3; ``predict``
+    here is still the upstream Monte-Carlo plug-in over W draws from val.
     """
 
     def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
@@ -255,6 +262,8 @@ class NMMR_Trainer_DemandMARExperiment(object):
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
         self.use_mar_modified = train_params.get('use_mar_modified', False)
+        self.n_folds = int(train_params.get('n_folds', 5))
+        self.mar_bandwidth = train_params.get('mar_bandwidth', None)  # None -> median heuristic
         self.random_seed = random_seed
 
         self.mse_loss = nn.MSELoss()
@@ -270,7 +279,6 @@ class NMMR_Trainer_DemandMARExperiment(object):
     def train(self, train_t: PVTrainDataSetMARTorch, val_t: PVTrainDataSetMARTorch,
               verbose: int = 0) -> MLP_for_NMMR:
 
-        # inputs to h are (A, W); kernel inputs are (A, Z). delta_w is unused in Pass 1.
         model = MLP_for_NMMR(input_dim=2, train_params=self.train_params)
 
         if self.gpu_flg:
@@ -280,6 +288,13 @@ class NMMR_Trainer_DemandMARExperiment(object):
 
         optimizer = optim.Adam(list(model.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
 
+        if self.use_mar_modified:
+            return self._train_mar_modified(model, optimizer, train_t, val_t)
+        return self._train_placeholder(model, optimizer, train_t, val_t)
+
+    def _train_placeholder(self, model, optimizer, train_t: PVTrainDataSetMARTorch,
+                           val_t: PVTrainDataSetMARTorch) -> MLP_for_NMMR:
+        """Pass 1 placeholder: minibatched upstream NMMR loss; delta_w ignored."""
         n_train = train_t.treatment.shape[0]
 
         for epoch in tqdm(range(self.n_epochs)):
@@ -303,28 +318,78 @@ class NMMR_Trainer_DemandMARExperiment(object):
                 optimizer.step()
 
             if self.log_metrics:
-                with torch.no_grad():
-                    preds_train = model(torch.cat((train_t.treatment, train_t.outcome_proxy), dim=1))
-                    preds_val = model(torch.cat((val_t.treatment, val_t.outcome_proxy), dim=1))
-
-                    kernel_inputs_train = torch.cat((train_t.treatment, train_t.treatment_proxy), dim=1)
-                    kernel_inputs_val = torch.cat((val_t.treatment, val_t.treatment_proxy), dim=1)
-                    kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
-                    kernel_matrix_val = self.compute_kernel(kernel_inputs_val)
-
-                    mse_train = self.mse_loss(preds_train, train_t.outcome)
-                    mse_val = self.mse_loss(preds_val, val_t.outcome)
-                    self.writer.add_scalar('obs_MSE/train', mse_train, epoch)
-                    self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
-
-                    causal_loss_train = NMMR_loss(preds_train, train_t.outcome, kernel_matrix_train, self.loss_name)
-                    causal_loss_val = NMMR_loss(preds_val, val_t.outcome, kernel_matrix_val, self.loss_name)
-                    self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train, epoch)
-                    self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val, epoch)
-                    self.causal_train_losses.append(causal_loss_train)
-                    self.causal_val_losses.append(causal_loss_val)
+                self._log_epoch_metrics(model, train_t, val_t, epoch, mar_weights=None)
 
         return model
+
+    def _train_mar_modified(self, model, optimizer, train_t: PVTrainDataSetMARTorch,
+                            val_t: PVTrainDataSetMARTorch) -> MLP_for_NMMR:
+        """Pass 2: full-batch SGD with the MAR-imputed U-statistic loss."""
+        n_train = train_t.treatment.shape[0]
+
+        # Precompute (once) the cross-fit NW weight matrix on L⁺ = (A, Z, Y)
+        # and the kernel matrix on L = (A, Z). Both are fixed across SGD.
+        l_plus = torch.cat((train_t.treatment, train_t.treatment_proxy, train_t.outcome), dim=1)
+        fold_indices = create_k_folds(train_t, n_folds=self.n_folds, seed=self.random_seed)
+        mar_weights, used_bandwidth = precompute_nw_weights(
+            l_plus=l_plus,
+            fold_indices=fold_indices,
+            delta_w=train_t.delta_w,
+            bandwidth=self.mar_bandwidth,
+        )
+        kernel_inputs_train = torch.cat((train_t.treatment, train_t.treatment_proxy), dim=1)
+        kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
+
+        if self.log_metrics:
+            self.writer.add_scalar('mar_imputer/bandwidth', used_bandwidth, 0)
+            self.writer.add_scalar('mar_imputer/n_folds', self.n_folds, 0)
+            self.writer.add_scalar('mar_imputer/missing_rate',
+                                   1.0 - float(train_t.delta_w.mean().item()), 0)
+
+        for epoch in tqdm(range(self.n_epochs)):
+            optimizer.zero_grad()
+            train_x = torch.cat((train_t.treatment, train_t.outcome_proxy), dim=1)
+            pred_y = model(train_x)
+            causal_loss_train = NMMR_loss_mar(
+                pred_y, train_t.outcome, train_t.delta_w, mar_weights,
+                kernel_matrix_train, self.loss_name,
+            )
+            causal_loss_train.backward()
+            optimizer.step()
+
+            if self.log_metrics:
+                self._log_epoch_metrics(model, train_t, val_t, epoch, mar_weights=mar_weights)
+
+        return model
+
+    def _log_epoch_metrics(self, model, train_t, val_t, epoch, mar_weights):
+        with torch.no_grad():
+            preds_train = model(torch.cat((train_t.treatment, train_t.outcome_proxy), dim=1))
+            preds_val = model(torch.cat((val_t.treatment, val_t.outcome_proxy), dim=1))
+
+            kernel_inputs_train = torch.cat((train_t.treatment, train_t.treatment_proxy), dim=1)
+            kernel_inputs_val = torch.cat((val_t.treatment, val_t.treatment_proxy), dim=1)
+            kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
+            kernel_matrix_val = self.compute_kernel(kernel_inputs_val)
+
+            mse_train = self.mse_loss(preds_train, train_t.outcome)
+            mse_val = self.mse_loss(preds_val, val_t.outcome)
+            self.writer.add_scalar('obs_MSE/train', mse_train, epoch)
+            self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
+
+            if mar_weights is None:
+                causal_loss_train = NMMR_loss(preds_train, train_t.outcome, kernel_matrix_train, self.loss_name)
+            else:
+                causal_loss_train = NMMR_loss_mar(
+                    preds_train, train_t.outcome, train_t.delta_w, mar_weights,
+                    kernel_matrix_train, self.loss_name,
+                )
+            # val: no MAR imputation needed for diagnostic logging (val data is just used for ATE plug-in).
+            causal_loss_val = NMMR_loss(preds_val, val_t.outcome, kernel_matrix_val, self.loss_name)
+            self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train, epoch)
+            self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val, epoch)
+            self.causal_train_losses.append(causal_loss_train)
+            self.causal_val_losses.append(causal_loss_val)
 
     @staticmethod
     def predict(model, test_data_t: PVTestDataSetTorch, val_data_t: PVTrainDataSetMARTorch):
