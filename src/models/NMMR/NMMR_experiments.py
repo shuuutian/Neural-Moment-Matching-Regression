@@ -8,8 +8,9 @@ import torch
 
 from src.data.ate import generate_train_data_ate, generate_val_data_ate, generate_test_data_ate, get_preprocessor_ate
 from src.data.ate.data_class import PVTrainDataSetTorch, PVTestDataSetTorch, RHCTestDataSetTorch
-from src.models.NMMR.NMMR_trainers import NMMR_Trainer_DemandExperiment, NMMR_Trainer_dSpriteExperiment, \
-    NMMR_Trainer_RHCExperiment
+from src.data.ate.data_class_mar import PVTrainDataSetMARTorch
+from src.models.NMMR.NMMR_trainers import NMMR_Trainer_DemandExperiment, NMMR_Trainer_DemandMARExperiment, \
+    NMMR_Trainer_dSpriteExperiment, NMMR_Trainer_RHCExperiment
 
 
 def NMMR_experiment(data_config: Dict[str, Any], model_config: Dict[str, Any],
@@ -24,23 +25,30 @@ def NMMR_experiment(data_config: Dict[str, Any], model_config: Dict[str, Any],
     val_data = generate_val_data_ate(data_config=data_config, rand_seed=random_seed + 1)
     test_data = generate_test_data_ate(data_config=data_config)
 
-    # convert datasets to Torch (for GPU runtime)
-    train_t = PVTrainDataSetTorch.from_numpy(train_data)
-    val_data_t = PVTrainDataSetTorch.from_numpy(val_data)
-
     data_name = data_config.get("name", None)
-    if data_name in ['dsprite', 'demand']:
+
+    # convert datasets to Torch (for GPU runtime)
+    if data_name == "demand_mar":
+        train_t = PVTrainDataSetMARTorch.from_numpy(train_data)
+        val_data_t = PVTrainDataSetMARTorch.from_numpy(val_data)
+    else:
+        train_t = PVTrainDataSetTorch.from_numpy(train_data)
+        val_data_t = PVTrainDataSetTorch.from_numpy(val_data)
+
+    if data_name in ['dsprite', 'demand', 'demand_mar']:
         test_data_t = PVTestDataSetTorch.from_numpy(test_data)
     elif data_name == 'rhc':
         test_data_t = RHCTestDataSetTorch.from_numpy(test_data)
     else:
-        raise KeyError(f"Your data config contained name = {data_name}, but must be one of [dsprite, demand, rhc]")
+        raise KeyError(f"Your data config contained name = {data_name}, but must be one of [dsprite, demand, demand_mar, rhc]")
 
     # retrieve the trainer for this experiment
     if data_name == "dsprite":
         trainer = NMMR_Trainer_dSpriteExperiment(data_config, model_config, random_seed, one_mdl_dump_dir)
     elif data_name == "demand":
         trainer = NMMR_Trainer_DemandExperiment(data_config, model_config, random_seed, one_mdl_dump_dir)
+    elif data_name == "demand_mar":
+        trainer = NMMR_Trainer_DemandMARExperiment(data_config, model_config, random_seed, one_mdl_dump_dir)
     elif data_name == 'rhc':
         trainer = NMMR_Trainer_RHCExperiment(data_config, model_config, random_seed, one_mdl_dump_dir)
 
@@ -55,7 +63,7 @@ def NMMR_experiment(data_config: Dict[str, Any], model_config: Dict[str, Any],
 
     if data_name == "dsprite":
         E_wx_hawx = trainer.predict(model, test_data_t, val_data_t, batch_size=model_config.get('val_batch_size', None))
-    elif data_name == "demand":
+    elif data_name in ("demand", "demand_mar"):
         E_wx_hawx = trainer.predict(model, test_data_t, val_data_t)
     elif data_name == "rhc":
         E_wx_hawx = trainer.predict(model, test_data_t)

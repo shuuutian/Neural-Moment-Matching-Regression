@@ -9,6 +9,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from src.data.ate.data_class import PVTrainDataSetTorch, PVTestDataSetTorch, RHCTestDataSet
+from src.data.ate.data_class_mar import PVTrainDataSetMARTorch
 from src.models.NMMR.NMMR_loss import NMMR_loss, NMMR_loss_batched
 from src.models.NMMR.NMMR_model import MLP_for_NMMR, cnn_for_dsprite
 from src.models.NMMR.kernel_utils import calculate_kernel_matrix, calculate_kernel_matrix_batched, rbf_kernel
@@ -221,6 +222,122 @@ class NMMR_Trainer_DemandExperiment(object):
 
         # Compute model's predicted E[Y | do(A)] = E_w[h(a, w)]
         # Note: the mean is taken over the n_sample axis, so we obtain {intervention_array_len} number of expected values
+        with torch.no_grad():
+            E_w_haw = torch.mean(model(model_inputs_test), dim=1)
+
+        return E_w_haw.cpu()
+
+
+class NMMR_Trainer_DemandMARExperiment(object):
+    """MAR-aware NMMR trainer for the PCI demand DGP.
+
+    Pass 1 placeholder behaviour: ignores ``delta_w`` and runs the upstream
+    NMMR loss / Monte-Carlo ATE plug-in on whatever ``outcome_proxy`` is
+    handed over. The MAR-imputed loss (paper §4.4) lands in Pass 2; the
+    MAR-aware ATE estimator lands in Pass 3.
+
+    Honours an optional ``model_config["use_mar_modified"]`` flag to make
+    the placeholder vs MAR-aware branch explicit, but in Pass 1 both
+    branches behave identically.
+    """
+
+    def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
+                 dump_folder: Optional[Path] = None):
+
+        self.data_config = data_configs
+        self.train_params = train_params
+        self.n_sample = self.data_config['n_sample']
+        self.n_epochs = train_params['n_epochs']
+        self.batch_size = train_params['batch_size']
+        self.gpu_flg = torch.cuda.is_available()
+        self.log_metrics = train_params['log_metrics'] == "True"
+        self.l2_penalty = train_params['l2_penalty']
+        self.learning_rate = train_params['learning_rate']
+        self.loss_name = train_params['loss_name']
+        self.use_mar_modified = train_params.get('use_mar_modified', False)
+        self.random_seed = random_seed
+
+        self.mse_loss = nn.MSELoss()
+
+        if self.log_metrics:
+            self.writer = SummaryWriter(log_dir=op.join(dump_folder, f"tensorboard_log_{random_seed}"))
+            self.causal_train_losses = []
+            self.causal_val_losses = []
+
+    def compute_kernel(self, kernel_inputs):
+        return calculate_kernel_matrix(kernel_inputs)
+
+    def train(self, train_t: PVTrainDataSetMARTorch, val_t: PVTrainDataSetMARTorch,
+              verbose: int = 0) -> MLP_for_NMMR:
+
+        # inputs to h are (A, W); kernel inputs are (A, Z). delta_w is unused in Pass 1.
+        model = MLP_for_NMMR(input_dim=2, train_params=self.train_params)
+
+        if self.gpu_flg:
+            train_t = train_t.to_gpu()
+            val_t = val_t.to_gpu()
+            model.cuda()
+
+        optimizer = optim.Adam(list(model.parameters()), lr=self.learning_rate, weight_decay=self.l2_penalty)
+
+        n_train = train_t.treatment.shape[0]
+
+        for epoch in tqdm(range(self.n_epochs)):
+            permutation = torch.randperm(n_train)
+
+            for i in range(0, n_train, self.batch_size):
+                indices = permutation[i:i + self.batch_size]
+                batch_A = train_t.treatment[indices]
+                batch_W = train_t.outcome_proxy[indices]
+                batch_y = train_t.outcome[indices]
+                batch_Z = train_t.treatment_proxy[indices]
+
+                optimizer.zero_grad()
+                batch_x = torch.cat((batch_A, batch_W), dim=1)
+                pred_y = model(batch_x)
+                kernel_inputs_train = torch.cat((batch_A, batch_Z), dim=1)
+                kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
+
+                causal_loss_train = NMMR_loss(pred_y, batch_y, kernel_matrix_train, self.loss_name)
+                causal_loss_train.backward()
+                optimizer.step()
+
+            if self.log_metrics:
+                with torch.no_grad():
+                    preds_train = model(torch.cat((train_t.treatment, train_t.outcome_proxy), dim=1))
+                    preds_val = model(torch.cat((val_t.treatment, val_t.outcome_proxy), dim=1))
+
+                    kernel_inputs_train = torch.cat((train_t.treatment, train_t.treatment_proxy), dim=1)
+                    kernel_inputs_val = torch.cat((val_t.treatment, val_t.treatment_proxy), dim=1)
+                    kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
+                    kernel_matrix_val = self.compute_kernel(kernel_inputs_val)
+
+                    mse_train = self.mse_loss(preds_train, train_t.outcome)
+                    mse_val = self.mse_loss(preds_val, val_t.outcome)
+                    self.writer.add_scalar('obs_MSE/train', mse_train, epoch)
+                    self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
+
+                    causal_loss_train = NMMR_loss(preds_train, train_t.outcome, kernel_matrix_train, self.loss_name)
+                    causal_loss_val = NMMR_loss(preds_val, val_t.outcome, kernel_matrix_val, self.loss_name)
+                    self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train, epoch)
+                    self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val, epoch)
+                    self.causal_train_losses.append(causal_loss_train)
+                    self.causal_val_losses.append(causal_loss_val)
+
+        return model
+
+    @staticmethod
+    def predict(model, test_data_t: PVTestDataSetTorch, val_data_t: PVTrainDataSetMARTorch):
+        # Pass 1 placeholder: same Monte-Carlo plug-in as upstream demand.
+        # Marginalises over W draws from val_data_t.outcome_proxy. Note that
+        # under mar_modified mode, ~30% of those Ws are zero (missing), which
+        # biases this MC plug-in toward zero by construction. Replaced in Pass 3.
+        intervention_array_len = test_data_t.treatment.shape[0]
+        num_W_test = val_data_t.outcome_proxy.shape[0]
+        temp1 = test_data_t.treatment.expand(-1, num_W_test)
+        temp2 = val_data_t.outcome_proxy.expand(-1, intervention_array_len)
+        model_inputs_test = torch.stack((temp1, temp2.T), dim=-1)
+
         with torch.no_grad():
             E_w_haw = torch.mean(model(model_inputs_test), dim=1)
 

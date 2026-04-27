@@ -4,8 +4,13 @@ from sklearn.preprocessing import StandardScaler
 
 from src.data.ate.preprocess import get_preprocessor_ate
 from src.data.ate.demand_pv import generate_test_demand_pv, generate_train_demand_pv
+from src.data.ate.demand_pv_mar import (
+    generate_test_demand_pv_mar,
+    generate_train_demand_pv_mar,
+)
 from src.data.ate.dsprite import generate_train_dsprite, generate_test_dsprite
 from src.data.ate.data_class import PVTestDataSet, PVTrainDataSet, RHCTestDataSet
+from src.data.ate.data_class_mar import PVTrainDataSetMAR
 from src.data.ate.rhc_experiment import generate_train_rhc, generate_val_rhc, generate_test_rhc
 
 
@@ -13,6 +18,8 @@ def generate_train_data_ate(data_config: Dict[str, Any], rand_seed: int) -> PVTr
     data_name = data_config["name"]
     if data_name == "demand":
         return generate_train_demand_pv(seed=rand_seed, **data_config)
+    elif data_name == "demand_mar":
+        return generate_train_demand_pv_mar(seed=rand_seed, **data_config)
     elif data_name == "dsprite":
         return generate_train_dsprite(rand_seed=rand_seed, **data_config)
     elif data_name == 'rhc':
@@ -28,6 +35,8 @@ def generate_val_data_ate(data_config: Dict[str, Any], rand_seed: int) -> PVTrai
         return generate_train_dsprite(rand_seed=rand_seed, n_sample=n_sample)
     elif data_name == "demand":
         return generate_train_demand_pv(seed=rand_seed, **data_config)
+    elif data_name == "demand_mar":
+        return generate_train_demand_pv_mar(seed=rand_seed, **data_config)
     elif data_name == "rhc":
         return generate_val_rhc(data_config['use_all_X'].lower() == "true")
     else:
@@ -38,6 +47,8 @@ def generate_test_data_ate(data_config: Dict[str, Any]) -> Optional[Union[PVTest
     data_name = data_config["name"]
     if data_name == "demand":
         return generate_test_demand_pv(**data_config)
+    elif data_name == "demand_mar":
+        return generate_test_demand_pv_mar(**data_config)
     elif data_name == "dsprite":
         return generate_test_dsprite()
     elif data_name == "rhc":

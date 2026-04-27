@@ -1,0 +1,18 @@
+[project]
+name = "neural-moment-matching-regression"
+version = "0.1.0"
+description = "NMMR upstream + MAR-PCI extension (sister to DeepGMM/DFPV)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0.0",
+    "scipy>=1.13.0",
+    "scikit-learn>=1.4.0",
+    "pandas>=2.2.0",
+    "matplotlib>=3.8.0",
+    "torch>=2.1.0",
+    "tensorboard>=2.16.0",
+    "click>=8.1.0",
+    "tqdm>=4.66.0",
+    "joblib>=1.3.0",
+]

@@ -6,37 +6,40 @@ import pandas as pd
 import logging
 
 from src.utils import grid_search_dict
-from src.models.kernelPV.model import kpv_experiments
-from src.models.DFPV.trainer import dfpv_experiments
-from src.models.DFPV_CNN.trainer import dfpv_cnn_experiments
-from src.models.PMMR.model import pmmr_experiments
-from src.models.CEVAE.trainer import cevae_experiments
-from src.models.NMMR.NMMR_experiments import NMMR_experiment
-from src.models.linear_regression.linear_reg_experiments import linear_reg_demand_experiment
-from src.models.naive_neural_net.naive_nn_experiments import naive_nn_experiment
-from src.models.twoSLS.twoSLS_experiments import twoSLS_experiment
+
 logger = logging.getLogger()
 
 
 def get_run_func(mdl_name: str):
+    # Lazy imports so running NMMR (the only model needed for MAR-PCI) does not
+    # require jax / tensorflow / etc., which the legacy baselines pull in.
     if mdl_name == "kpv":
+        from src.models.kernelPV.model import kpv_experiments
         return kpv_experiments
     elif mdl_name == "dfpv":
+        from src.models.DFPV.trainer import dfpv_experiments
         return dfpv_experiments
     elif mdl_name == "dfpv_cnn":
+        from src.models.DFPV_CNN.trainer import dfpv_cnn_experiments
         return dfpv_cnn_experiments
     elif mdl_name == "pmmr":
+        from src.models.PMMR.model import pmmr_experiments
         return pmmr_experiments
     elif mdl_name == "cevae":
+        from src.models.CEVAE.trainer import cevae_experiments
         return cevae_experiments
     elif mdl_name == "nmmr":
+        from src.models.NMMR.NMMR_experiments import NMMR_experiment
         return NMMR_experiment
     elif mdl_name in ["linear_regression_AY", "linear_regression_AWZY", "linear_regression_AY2",
                       "linear_regression_AWZY2", "linear_regression_AWY", "linear_regression_AWY2"]:
+        from src.models.linear_regression.linear_reg_experiments import linear_reg_demand_experiment
         return linear_reg_demand_experiment
     elif mdl_name == "naive_neural_net_AY" or mdl_name == "naive_neural_net_AWZY" or mdl_name == "naive_neural_net_AWY":
+        from src.models.naive_neural_net.naive_nn_experiments import naive_nn_experiment
         return naive_nn_experiment
     elif mdl_name == "twoSLS":
+        from src.models.twoSLS.twoSLS_experiments import twoSLS_experiment
         return twoSLS_experiment
     else:
         raise ValueError(f"name {mdl_name} is not known")
