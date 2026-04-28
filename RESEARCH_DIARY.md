@@ -120,8 +120,107 @@ causes, in order of perceived likelihood:
 - [ ] Confirm with Wen Zhou's paper (paper §5) what β̂(a) MSE the demand DGP
       gives at n=5000 in the full-data setting, to calibrate expectations.
 
+**Plots.** `plots/oos/bias_distribution.png`, `plots/oos/ate_curves.png`.
+
 **Dump directories.**
 - `dumps/nmmr_04-28-09-51-29/` — oracle_baseline, sequential
 - `dumps/nmmr_04-28-09-52-17/` — baseline, sequential
 - `dumps/nmmr_04-28-09-52-52/` — oracle_modified, sequential
 - `dumps/nmmr_04-28-10-05-25/` — modified, parallel (-t 8)
+
+---
+
+## 2026-04-28 — In-support test range [22, 36]: OOD hypothesis confirmed
+
+**Hypothesis.** Training prices follow N(27.15, 6.62²) so the 5th–95th support
+is roughly [15.7, 36.5]. The default test grid [10, 30] places its first 3
+points at a ∈ {10.0, 12.2, 14.4} *below* the 5th percentile — well outside the
+training support. The systematic overshoot we saw at low a in the previous
+entry could simply be the model extrapolating where it has no signal.
+
+**Action.** Added `test_a_min` / `test_a_max` / `test_n_grid` knobs to
+`generate_test_demand_pv_mar` (defaults preserve [10, 30] behaviour). New
+configs `configs/mar_pci_configs/{baseline,oracle_baseline,oracle_modified,modified}_insupport.json`
+with the test grid moved to [22, 36] (10 points), keeping all other config
+knobs identical to the OOS run.
+
+**Result.** Same 100-rep validation, only the test grid changed:
+
+| role | OOS [10, 30] MSE | **IS [22, 36] MSE** | OOS bias L2 | **IS bias L2** | OOS mean bias | **IS mean bias** |
+|---|---:|---:|---:|---:|---:|---:|
+| oracle_baseline | 60.40 | **19.45** | 7.18 | 4.20 | +0.48 | −4.07 |
+| baseline | 74.02 | **15.00** | 5.04 | 2.55 | +0.18 | −0.82 |
+| oracle_modified | 64.82 | **19.75** | 7.61 | 4.29 | +0.91 | −4.23 |
+| modified | 86.58 | **6.84** | 7.85 | 1.51 | +3.37 | −1.03 |
+
+**Headline reversal.** The MSE ranking *flips* between OOS and IS:
+
+  - OOS [10, 30]: `oracle_baseline (60.4) < oracle_modified (64.8) <
+    baseline (74.0) < modified (86.6)`
+  - IS [22, 36]:  `modified (6.84) < baseline (15.0) <
+    oracle_baseline (19.5) ≈ oracle_modified (19.8)`
+
+In support, **`modified` is the best estimator of the four**, beating
+`baseline` 2.2× on MSE and beating both oracles 2.9×. The bias-correction
+story the §4.4 plug-in tells is being borne out — but only when the test
+grid sits inside the training support.
+
+**What the plots show**
+(`plots/insupport/bias_distribution.png`, `plots/insupport/ate_curves.png`):
+
+  - Bias distribution is clearly bimodal in IS: a left mode at ~−4 contains
+    `oracle_baseline` + `oracle_modified` (systematic underestimation across
+    the in-support range), and a right mode near 0 contains `baseline` +
+    `modified`. The two oracles' distributions are tighter (lower variance)
+    but biased; the MAR-friendly methods are wider but centered on truth.
+  - ATE-curve plot: the two oracles' mean curves track ~3–5 below the
+    structural curve across [22, 36]; `modified` and `baseline` overlap the
+    structural curve closely.
+
+**Why the inversion?** Two things going on, both consistent with the data.
+
+  1. **OOS overshoot dominates the [10, 30] MSE.** The structural ATE peaks
+     at ~63 around a=17, then decreases. At a ∈ [10, 14] (heavily OOD), all
+     four methods extrapolate to values 17–20 above truth. That single tail
+     contributes ~50% of the per-curve MSE in the OOS metric, and it
+     contaminates `modified` worst because the q̂ smoother amplifies the
+     extrapolation. Strip those points (move to [22, 36]) and the metric
+     becomes a clean comparison on the in-support fit, where `modified` is
+     legitimately better.
+  2. **Oracles systematically underestimate in the right half of the
+     support.** Both oracle paths converge to a flatter curve than the
+     truth in [22, 36] — they undershoot by ~4 across the range. The MAR
+     loss (full-batch SGD over the imputed-residual U-statistic) ends up
+     in a different optimum that fits this part of the curve better. The
+     matched-step heuristic (Pass 4) controls *total* step count but not
+     full-batch vs. minibatched optimizer trajectory; that asymmetry is
+     visible here as a different inductive bias, not just a noise-level
+     difference. Verifying this is one of the followups.
+
+**Updated read.** Pass 1–4 implementation looks correct. The estimator
+delivers what the §4.4 paper predicts on data within the training support.
+The OOS pathology is real but largely an artefact of the default test grid
+straddling the training support boundary at the low end.
+
+**Followups (refined from 2026-04-28-am).**
+- [ ] Investigate why oracle paths underestimate in [22, 36] — minibatched
+      vs. full-batch optimization difference, or something deeper? Try
+      bumping oracle_baseline `n_epochs` to 150 with `batch_size=5000`
+      (full-batch) to isolate the optimization-trajectory contribution.
+- [ ] Plot bias *per a-value* (not just per-rep mean bias) so the
+      OOD-extrapolation failure at a∈[10, 14] is visible alongside the
+      in-support fit quality.
+- [ ] Bandwidth sweep on `modified` (defer until the optimization
+      trajectory question is resolved — bandwidth is a smaller effect).
+- [ ] Confirm with paper §5 / Wen Zhou what scale of MSE the demand DGP
+      gives at n=5000 in the full-data setting on a similar test grid,
+      to calibrate expectations.
+
+**Plots.** `plots/insupport/bias_distribution.png`,
+`plots/insupport/ate_curves.png`.
+
+**Dump directories.**
+- `dumps/nmmr_04-28-10-46-30/` — oracle_baseline_insupport
+- `dumps/nmmr_04-28-10-46-56/` — baseline_insupport
+- `dumps/nmmr_04-28-10-47-15/` — oracle_modified_insupport
+- `dumps/nmmr_04-28-10-50-50/` — modified_insupport

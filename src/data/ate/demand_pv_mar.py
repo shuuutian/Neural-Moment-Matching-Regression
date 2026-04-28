@@ -149,13 +149,27 @@ def generate_train_demand_pv_mar(
     )
 
 
-def generate_test_demand_pv_mar(W_noise: float = 1.0, **kwargs) -> PVTestDataSet:
-    """Test grid + structural ATE. Identical to the upstream test split.
+def generate_test_demand_pv_mar(
+    W_noise: float = 1.0,
+    test_a_min: float = 10.0,
+    test_a_max: float = 30.0,
+    test_n_grid: int = 10,
+    **kwargs,
+) -> PVTestDataSet:
+    """Test grid + structural ATE.
 
-    The test grid is on the treatment dimension only; missingness on W is a
-    training-time concern. Test-time ATE evaluation marginalises over W.
+    Defaults match the upstream demand test split (10 evenly-spaced prices in
+    [10, 30]). The training-price distribution under the demand DGP is
+    approximately N(27.15, 6.62²); the lower half of the default test range is
+    OOD relative to the training support, which can dominate validation
+    metrics. Override via ``data.test_a_min`` / ``data.test_a_max`` /
+    ``data.test_n_grid`` in the config to evaluate on an in-support subset
+    (e.g. [22, 36]).
+
+    Missingness on W is a training-time concern; test-time ATE evaluation
+    marginalises over W.
     """
-    price = np.linspace(10, 30, 10)
+    price = np.linspace(test_a_min, test_a_max, test_n_grid)
     treatment = np.array([cal_structural(p, W_noise) for p in price])
     return PVTestDataSet(
         structural=treatment[:, np.newaxis],
