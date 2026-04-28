@@ -23,7 +23,7 @@ The plan we are executing is on Notion — *0426 — Implementation and Validati
 | `src/models/NMMR/kernel_utils.py` (RBF on (A,Z[,X])) | §4.4 RKHS kernel; kernel inputs L = (A,Z,X) ⊂ L⁺ are MAR-immune |
 | `src/models/NMMR/NMMR_trainers.py:NMMR_Trainer_DemandExperiment.train` | SGD over the U-statistic loss |
 | `NMMR_Trainer_DemandExperiment.predict` | §4.4 ATE plug-in (full-data variant): β̂(a) = mean over W draws of h_θ̂(W,a) |
-| MAR ATE plug-in (Pass 3) | §4.4 β̂(a) = (1/n) Σ_k Σ_{i∈I_k} { δ_W h_θ̂(W_i,a,X_i) + (1−δ_W) q̂_{a,θ̂}(L⁺_i) } |
+| `NMMR_Trainer_DemandMARExperiment._predict_mar` (Pass 3) | §4.4 β̂(a) = (1/n) Σ_k Σ_{i∈I_k} { δ_W h_θ̂(W_i,a,X_i) + (1−δ_W) q̂_{a,θ̂}(L⁺_i) }; reuses the Pass 2 cross-fit weight matrix to evaluate q̂_{a,θ̂}(L⁺_i) = Σ_j W[i,j] · h_θ̂(W_j,a) |
 
 ## Four roles in the MAR-PCI validation set
 
@@ -37,7 +37,9 @@ The plan we are executing is on Notion — *0426 — Implementation and Validati
 | **modified** | MAR-NMMR | Partial MAR data | `data.mode = "mar_modified"` + `use_mar_modified = true` |
 | **nmmr_u_repro** (control) | Original NMMR | Upstream demand-noise grid | unchanged upstream config `configs/demand_noise_configs/nmmr_u_demandnoise.json` |
 
-In **Pass 2**, `use_mar_modified=true` switches the trainer to a full-batch SGD path that uses `NMMR_loss_mar` with a precomputed cross-fit NW weight matrix on L⁺. The imputed residual is `r̃_i = δ_i · r_i + (1 − δ_i) · Σ_j W[i,j] · r_j`; the kernel matrix on L = (A, Z) is unchanged from upstream. Reduces exactly to the upstream loss when δ ≡ 1, so `oracle_modified` should converge to the same ATE as `oracle_baseline` in expectation. The MAR-aware ATE estimator (paper §4.4 plug-in with `q̂_{a,θ}`) is still pending — `predict()` is the upstream Monte-Carlo plug-in until Pass 3.
+In **Pass 2**, `use_mar_modified=true` switches the trainer to a full-batch SGD path that uses `NMMR_loss_mar` with a precomputed cross-fit NW weight matrix on L⁺. The imputed residual is `r̃_i = δ_i · r_i + (1 − δ_i) · Σ_j W[i,j] · r_j`; the kernel matrix on L = (A, Z) is unchanged from upstream. Reduces exactly to the upstream loss when δ ≡ 1, so `oracle_modified` should converge to the same ATE as `oracle_baseline` in expectation.
+
+In **Pass 3**, `predict()` branches on `use_mar_modified`. The MAR-aware path (`_predict_mar`) replaces the upstream Monte-Carlo plug-in with the §4.4 estimator over training rows: for each test treatment `a`, observed rows contribute `h_θ̂(W_i, a)` directly, while missing rows contribute `q̂_{a,θ̂}(L⁺_i) = Σ_j W[i,j] · h_θ̂(W_j, a)` using the same cross-fit weight matrix from Pass 2. The non-MAR path (`baseline`, `oracle_baseline`) keeps the upstream MC plug-in over val W. Under δ ≡ 1, `_predict_mar` reduces exactly (byte-identical) to the upstream MC plug-in evaluated on training data — verified algebraically.
 
 ## Sibling references
 

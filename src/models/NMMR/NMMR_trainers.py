@@ -232,20 +232,25 @@ class NMMR_Trainer_DemandExperiment(object):
 class NMMR_Trainer_DemandMARExperiment(object):
     """MAR-aware NMMR trainer for the PCI demand DGP.
 
-    Two training paths gated by ``train_params["use_mar_modified"]``:
+    Two paths gated by ``train_params["use_mar_modified"]``:
 
       * False (Pass 1 placeholder, used by ``baseline`` and ``oracle_baseline``
-        roles): minibatched upstream NMMR loss; ``delta_w`` is ignored.
+        roles): minibatched upstream NMMR loss with ``delta_w`` ignored, and
+        ``predict`` is the upstream Monte-Carlo plug-in over W draws from val.
 
-      * True (Pass 2, used by ``oracle_modified`` and ``modified`` roles):
-        full-batch SGD with the MAR-imputed U-statistic loss
+      * True (Pass 2 + Pass 3, used by ``oracle_modified`` and ``modified``
+        roles): full-batch SGD with the MAR-imputed U-statistic loss
         (``NMMR_loss_mar``). At ``train()`` start we precompute the cross-fit
         Nadaraya-Watson weight matrix on L⁺ = (A, Z, Y) once; the per-step
-        imputation is then a single matrix-vector product. Reduces exactly to
-        the upstream loss when δ ≡ 1.
+        imputation is then a single matrix-vector product. ``predict`` is the
+        MAR-aware ATE plug-in (paper §4.4)
 
-    The MAR-aware ATE estimator (paper §4.4) lands in Pass 3; ``predict``
-    here is still the upstream Monte-Carlo plug-in over W draws from val.
+            β̂(a) = (1/n) Σ_i { δ_i h_θ̂(W_i, a) + (1 − δ_i) q̂_{a,θ̂}(L⁺_i) }
+
+        where q̂_{a,θ̂}(L⁺_i) = Σ_j W[i,j] · h_θ̂(W_j, a) reuses the same
+        cross-fit weight matrix (W depends only on L⁺, not on θ). Both paths
+        reduce exactly to their upstream-NMMR analogues when δ ≡ 1, modulo
+        averaging over training data instead of val data.
     """
 
     def __init__(self, data_configs: Dict[str, Any], train_params: Dict[str, Any], random_seed: int,
@@ -265,6 +270,10 @@ class NMMR_Trainer_DemandMARExperiment(object):
         self.n_folds = int(train_params.get('n_folds', 5))
         self.mar_bandwidth = train_params.get('mar_bandwidth', None)  # None -> median heuristic
         self.random_seed = random_seed
+
+        # Populated by _train_mar_modified, consumed by _predict_mar (Pass 3).
+        self._mar_train_cache: Optional[PVTrainDataSetMARTorch] = None
+        self._mar_weights: Optional[torch.Tensor] = None
 
         self.mse_loss = nn.MSELoss()
 
@@ -340,6 +349,12 @@ class NMMR_Trainer_DemandMARExperiment(object):
         kernel_inputs_train = torch.cat((train_t.treatment, train_t.treatment_proxy), dim=1)
         kernel_matrix_train = self.compute_kernel(kernel_inputs_train)
 
+        # Stash for the MAR-aware ATE plug-in (Pass 3 _predict_mar). Cross-fit
+        # validity carries over to predict because the weight matrix depends
+        # only on L⁺, which is fixed.
+        self._mar_train_cache = train_t
+        self._mar_weights = mar_weights
+
         if self.log_metrics:
             self.writer.add_scalar('mar_imputer/bandwidth', used_bandwidth, 0)
             self.writer.add_scalar('mar_imputer/n_folds', self.n_folds, 0)
@@ -391,12 +406,17 @@ class NMMR_Trainer_DemandMARExperiment(object):
             self.causal_train_losses.append(causal_loss_train)
             self.causal_val_losses.append(causal_loss_val)
 
+    def predict(self, model, test_data_t: PVTestDataSetTorch, val_data_t: PVTrainDataSetMARTorch):
+        if self.use_mar_modified:
+            return self._predict_mar(model, test_data_t)
+        return self._predict_placeholder(model, test_data_t, val_data_t)
+
     @staticmethod
-    def predict(model, test_data_t: PVTestDataSetTorch, val_data_t: PVTrainDataSetMARTorch):
-        # Pass 1 placeholder: same Monte-Carlo plug-in as upstream demand.
-        # Marginalises over W draws from val_data_t.outcome_proxy. Note that
-        # under mar_modified mode, ~30% of those Ws are zero (missing), which
-        # biases this MC plug-in toward zero by construction. Replaced in Pass 3.
+    def _predict_placeholder(model, test_data_t: PVTestDataSetTorch,
+                             val_data_t: PVTrainDataSetMARTorch):
+        # Upstream Monte-Carlo plug-in over W draws from val (used by the
+        # ``baseline`` and ``oracle_baseline`` roles, where the MAR machinery
+        # is inert).
         intervention_array_len = test_data_t.treatment.shape[0]
         num_W_test = val_data_t.outcome_proxy.shape[0]
         temp1 = test_data_t.treatment.expand(-1, num_W_test)
@@ -407,6 +427,51 @@ class NMMR_Trainer_DemandMARExperiment(object):
             E_w_haw = torch.mean(model(model_inputs_test), dim=1)
 
         return E_w_haw.cpu()
+
+    def _predict_mar(self, model, test_data_t: PVTestDataSetTorch):
+        """MAR-aware ATE plug-in (paper §4.4).
+
+            β̂(a) = (1/n) Σ_i { δ_i · h_θ̂(W_i, a) + (1 − δ_i) · q̂_{a,θ̂}(L⁺_i) }
+
+        with q̂_{a,θ̂}(L⁺_i) = Σ_j W[i,j] · h_θ̂(W_j, a) reusing the cross-fit
+        weight matrix from training. The sum runs over training rows; the val
+        split is unused under this branch.
+
+        Reduces to the upstream Monte-Carlo plug-in over training W when δ ≡ 1
+        (oracle_modified), and corrects the val-MC bias under mar_modified
+        (where ~missing_rate of val W's are zeroed-out missing markers).
+        """
+        if self._mar_train_cache is None or self._mar_weights is None:
+            raise RuntimeError(
+                "MAR predict called before _train_mar_modified populated the "
+                "cross-fit cache; check use_mar_modified is consistent."
+            )
+
+        train_t = self._mar_train_cache
+        mar_weights = self._mar_weights  # (n_train, n_train)
+
+        n_train = train_t.treatment.shape[0]
+        delta = train_t.delta_w                  # (n_train, 1)
+        W_obs = train_t.outcome_proxy            # (n_train, 1); 0 where δ=0
+        intervention_array_len = test_data_t.treatment.shape[0]
+
+        # Build a (intervention_array_len, n_train, 2) batch of (a, W_j) pairs,
+        # mirroring the upstream MC plug-in's broadcast trick.
+        temp_a = test_data_t.treatment.expand(-1, n_train)             # (A, n_train)
+        temp_w = W_obs.expand(-1, intervention_array_len)              # (n_train, A)
+        model_inputs = torch.stack((temp_a, temp_w.T), dim=-1)         # (A, n_train, 2)
+
+        with torch.no_grad():
+            h_a_W = model(model_inputs).squeeze(-1)                    # (A, n_train)
+            # q_hat[a, i] = Σ_j W[i,j] · h_a_W[a, j]; W[i,j] is zero unless j
+            # is observed AND in a different fold than i.
+            q_hat = h_a_W @ mar_weights.T                              # (A, n_train)
+
+            delta_row = delta.view(1, -1)                              # (1, n_train)
+            integrand = delta_row * h_a_W + (1.0 - delta_row) * q_hat  # (A, n_train)
+            beta_hat = integrand.mean(dim=1, keepdim=True)             # (A, 1)
+
+        return beta_hat.cpu()
 
 
 class NMMR_Trainer_dSpriteExperiment(object):
