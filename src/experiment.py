@@ -4,10 +4,42 @@ import os
 import numpy as np
 import pandas as pd
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from src.utils import grid_search_dict
 
 logger = logging.getLogger()
+
+
+def _run_repeats(run_func, env_param, mdl_param, one_mdl_dump_dir, n_repeat, num_cpus, verbose):
+    """Run ``n_repeat`` calls of ``run_func`` over distinct seeds.
+
+    Parallel iff ``num_cpus > 1`` AND ``n_repeat > 1``. Workers are spawned
+    fresh (so each re-imports torch with the BLAS-thread cap below applied)
+    and write per-seed pred files at distinct paths, so writes are
+    parallel-safe for the NMMR demand path. Other model paths in this repo
+    have not been audited for parallel safety — opt in via ``-t > 1`` only
+    for NMMR-style models that write per-seed dump files.
+    """
+    if num_cpus > 1 and n_repeat > 1:
+        # Cap per-worker BLAS threads so 12 cores aren't oversubscribed
+        # 12-ways. ProcessPoolExecutor on macOS defaults to "spawn", so
+        # each worker re-imports torch and picks up these env vars.
+        torch_threads = max(1, (os.cpu_count() or 1) // num_cpus)
+        os.environ.setdefault("OMP_NUM_THREADS", str(torch_threads))
+        os.environ.setdefault("MKL_NUM_THREADS", str(torch_threads))
+        results: list = [None] * n_repeat
+        with ProcessPoolExecutor(max_workers=num_cpus) as ex:
+            futures = {
+                ex.submit(run_func, env_param, mdl_param, one_mdl_dump_dir, idx, verbose): idx
+                for idx in range(n_repeat)
+            }
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                results[idx] = fut.result()
+        return [r for r in results if r is not None]
+    return [run_func(env_param, mdl_param, one_mdl_dump_dir, idx, verbose)
+            for idx in range(n_repeat)]
 
 
 def get_run_func(mdl_name: str):
@@ -85,10 +117,7 @@ def experiments(configs: Dict[str, Any],
                 metrics_df.rename(columns={'index': 'epoch_num'}, inplace=True)
                 metrics_df.to_csv(one_mdl_dump_dir.joinpath("train_metrics.csv"), index=False)
             else:
-                test_losses = []
-                for idx in range(n_repeat):
-                    test_loss = run_func(env_param, mdl_param, one_mdl_dump_dir, idx, verbose)
-                    if test_loss is not None:
-                        test_losses.append(test_loss)
+                test_losses = _run_repeats(run_func, env_param, mdl_param, one_mdl_dump_dir,
+                                           n_repeat, num_cpus, verbose)
                 if test_losses:
                     np.savetxt(one_mdl_dump_dir.joinpath("result.csv"), np.array(test_losses))
