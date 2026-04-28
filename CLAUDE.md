@@ -41,6 +41,8 @@ In **Pass 2**, `use_mar_modified=true` switches the trainer to a full-batch SGD 
 
 In **Pass 3**, `predict()` branches on `use_mar_modified`. The MAR-aware path (`_predict_mar`) replaces the upstream Monte-Carlo plug-in with the §4.4 estimator over training rows: for each test treatment `a`, observed rows contribute `h_θ̂(W_i, a)` directly, while missing rows contribute `q̂_{a,θ̂}(L⁺_i) = Σ_j W[i,j] · h_θ̂(W_j, a)` using the same cross-fit weight matrix from Pass 2. The non-MAR path (`baseline`, `oracle_baseline`) keeps the upstream MC plug-in over val W. Under δ ≡ 1, `_predict_mar` reduces exactly (byte-identical) to the upstream MC plug-in evaluated on training data — verified algebraically.
 
+In **Pass 4**, full-scale configs land at `configs/mar_pci_configs/{baseline,oracle_baseline,oracle_modified,modified}.json` (n=5000, n_repeat=100, missing_rate=0.3). The placeholder schedule (n_epochs=30, batch_size=1000) matches upstream `nmmr_u_demandnoise.json` and runs 5 minibatches/epoch × 30 = 150 SGD steps. The MAR schedule (n_epochs=150, batch_size=5000) runs full-batch (1 step/epoch) × 150 = 150 SGD steps — picked so the two paths get the same total step count and oracle_modified vs oracle_baseline is a clean apples-to-apples comparison. The full-batch design is intrinsic: the cross-fit NW weight matrix is precomputed once on the entire L⁺ and minibatching would require a per-batch fold strategy. Runtime is ~3-6 s/rep on CPU, so a full sweep across the four roles is ~30 min wall.
+
 ## Sibling references
 
 - `/Users/apple/DeepFeatureProxyVariable/src/data/ate/data_class_mar.py` — canonical `PVTrainDataSetMAR`.
