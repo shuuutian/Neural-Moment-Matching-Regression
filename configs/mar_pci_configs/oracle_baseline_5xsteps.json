@@ -1,0 +1,26 @@
+{
+    "n_repeat": 100,
+    "data": {
+        "name": "demand_mar",
+        "n_sample": 5000,
+        "mode": "oracle",
+        "missing_rate": 0.3,
+        "Z_noise": 1,
+        "W_noise": 1,
+        "test_a_min": 22,
+        "test_a_max": 36,
+        "test_n_grid": 10
+    },
+    "model": {
+        "name": "nmmr",
+        "n_epochs": 150,
+        "batch_size": 1000,
+        "log_metrics": "False",
+        "learning_rate": 0.003,
+        "l2_penalty": 3e-06,
+        "loss_name": "U_statistic",
+        "network_depth": 4,
+        "network_width": 80,
+        "use_mar_modified": false
+    }
+}

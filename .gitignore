@@ -1,3 +1,4 @@
 *.pyc
 /dumps/
 /logs/
+/plots/

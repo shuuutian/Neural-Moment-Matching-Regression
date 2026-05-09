@@ -42,8 +42,9 @@ def cal_structural(p: float, W_noise: float = 1):
     return np.mean(outcome)
 
 
-def generate_test_demand_pv(W_noise: float = 1, **kwargs):
-    price = np.linspace(10, 30, 10)
+def generate_test_demand_pv(W_noise: float = 1, test_a_min: float = 10.0,
+                            test_a_max: float = 30.0, test_n_grid: int = 10, **kwargs):
+    price = np.linspace(test_a_min, test_a_max, test_n_grid)
     treatment = np.array([cal_structural(p, W_noise) for p in price])
     return PVTestDataSet(structural=treatment[:, np.newaxis],
                          treatment=price[:, np.newaxis])

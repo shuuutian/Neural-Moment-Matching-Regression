@@ -224,3 +224,192 @@ straddling the training support boundary at the low end.
 - `dumps/nmmr_04-28-10-46-56/` — baseline_insupport
 - `dumps/nmmr_04-28-10-47-15/` — oracle_modified_insupport
 - `dumps/nmmr_04-28-10-50-50/` — modified_insupport
+
+---
+
+## 2026-04-28 — Oracle underestimate diagnostic: optimizer/step-count rejected
+
+**Question carried in from the previous entry.** Both oracle paths
+(`oracle_baseline`, `oracle_modified`) systematically underestimate β(a) by
+~4 across [22, 36]. The leading hypothesis was *optimizer-trajectory
+asymmetry*: the placeholder path is minibatched (bs=1000, 30 ep × 5 mb = 150
+SGD steps), while the MAR path is full-batch (bs=5000, 150 ep × 1 mb = 150
+SGD steps). Pass 4 matched step count but not trajectory, and full-batch
+SGD on the MAR-imputed loss might converge to a different minimum than
+minibatched SGD on the upstream loss.
+
+**Two diagnostics run in parallel** (n=5000, 100 reps, test∈[22, 36],
+otherwise identical to the four-role IS run):
+
+| Tag | Path | Schedule | Total SGD steps | Tests |
+|---|---|---|---:|---|
+| **D1** `oracle_baseline_fullbatch` | placeholder, no MAR loss | bs=5000, n_epochs=150 | 150 | optimizer trajectory |
+| **D2** `oracle_baseline_5xsteps`   | placeholder, no MAR loss | bs=1000, n_epochs=150 | 750 | under-convergence |
+
+Both compared against the existing `oracle_baseline_insupport` (minibatch,
+150 steps) and `oracle_modified_insupport` (full-batch, 150 steps, MAR loss
+inert under δ ≡ 1).
+
+**Headline result.** Neither hypothesis explains the bias. All three
+oracle_baseline variants land on essentially the same fit:
+
+| config | MSE_mean | bias_mean | bias@22 | bias@28 | bias@36 |
+|---|---:|---:|---:|---:|---:|
+| oracle_baseline (minibatch, 150 steps)       | 19.45 | −4.07 | −4.41 | −4.96 | −2.02 |
+| **D1**: fullbatch, 150 steps                  | 19.85 | −4.23 | −4.15 | −5.02 | −2.69 |
+| **D2**: minibatch, 750 steps (5×)             | 17.52 | −3.97 | −4.96 | −4.61 | −1.96 |
+| oracle_modified (fullbatch, 150 steps, MAR)   | 19.75 | −4.23 | −4.14 | −5.02 | −2.68 |
+
+Read out:
+- D1 vs minibatch oracle: bias differs by 0.16 — well within Monte Carlo
+  noise. Optimizer trajectory **does not** drive the bias.
+- D2 vs minibatch oracle: bias differs by 0.10 even with 5× more steps.
+  Under-convergence **does not** drive the bias either.
+- **D1 ≈ oracle_modified to two decimal places at every grid point.** This
+  is a clean runtime confirmation that the MAR loss reduces algebraically
+  to the upstream loss under δ ≡ 1, as the Pass 2 algebra check claimed.
+
+**The bias has structure across a.** It's not a flat additive shift; the
+bias is U-shaped, deepest at a≈26–28 (~−5) and shallower at the endpoints
+(~−2 at a=36). The full-data oracle fit *systematically misses curvature*
+in the mid-range of [22, 36]. See `plots/insupport/bias_per_treatment.png`
+and `plots/oracle_diag/bias_per_treatment.png`.
+
+**Updated read.** The systematic ~−4 oracle bias is intrinsic to the
+upstream-NMMR fit on this DGP at n=5000 with the upstream hyperparameters.
+It is NOT specific to the MAR machinery, NOT an artefact of the matched-
+step heuristic from Pass 4, and NOT relievable by a 5× training-step
+budget.
+
+**What remains as candidate causes (refined):**
+1. **Model class + kernel choice mismatch with the demand-DGP curvature.**
+   The kernel uses `length_scale=1` in (A, Z) space (upstream default;
+   `kernel_utils.rbf_kernel`) while A has SD≈6.62 — the kernel is heavily
+   localized. The U-statistic loss on a tightly-localized kernel may give
+   a fit that smooths out exactly the kind of mid-range curvature we see
+   missing here. This is upstream behavior, not a MAR-NMMR artefact.
+2. **Demand-DGP scale.** Wen Zhou's paper §5 reports their results at this
+   DGP; we have not yet calibrated against their numbers. The −4 mean bias
+   might match upstream-expected performance.
+3. **Test-grid / MC plug-in interaction.** `cal_structural` Monte-Carlos β(a)
+   over 10000 demand draws (uniform on [0, 10]) → views drawn from
+   7·ψ(demand)+45+N(0,1). If the val W's used by `_predict_placeholder`
+   come from a slightly different W marginal than `cal_structural` assumes
+   (e.g. tail effects), there's an extra MC bias on top of any model-fit
+   bias. Worth eyeballing.
+
+**Followups (refined).**
+- [ ] Run upstream `nmmr_u_repro` (`configs/demand_noise_configs/nmmr_u_demandnoise.json`)
+      at the (Z=1, W=1) grid point and compare its Figure 3 numbers to our
+      `oracle_baseline`. If upstream reports the same ~−4 bias, the
+      observation is calibration, not regression.
+- [ ] Sanity-check val-W vs `cal_structural`-W marginals: confirm whether
+      `_predict_placeholder` is averaging over a representative W population.
+- [ ] **Defer** the bandwidth sweep on `mar_bandwidth` until after the
+      upstream control above — bandwidth only affects q̂, and q̂ doesn't
+      enter the oracle bias.
+- [ ] Bigger network (e.g. 6×128) on `oracle_baseline_insupport` to test
+      capacity hypothesis.
+
+**Plots.**
+- `plots/insupport/bias_per_treatment.png` — new per-a bias curve for the
+  four-role IS run; shows the U-shape clearly.
+- `plots/oracle_diag/{bias_per_treatment,ate_curves,bias_distribution}.png`
+  — six lines, the three oracle variants (minibatch, fullbatch, 5× steps)
+  overlapping each other across [22, 36] while modified/baseline diverge.
+
+**Plotter changes** (`scripts/plot_validation.py`).
+- Now accepts `path::label` to override the auto-detected role tag, so
+  multiple dumps with the same data.mode + use_mar_modified can coexist
+  in one plot (e.g. three oracle variants).
+- Added `bias_per_treatment.png` output (mean ±1 std bias curve per role).
+
+**Dump directories.**
+- `dumps/nmmr_04-28-11-05-44/` — D1 oracle_baseline_fullbatch
+- `dumps/nmmr_04-28-11-12-24/` — D2 oracle_baseline_5xsteps
+
+---
+
+## 2026-04-28 — Upstream NMMR-U control: byte-identical match → bias is upstream
+
+**Question.** Carry over from previous entry: the systematic oracle bias might
+be intrinsic to upstream NMMR-U on this demand DGP, not a regression from the
+MAR wrapper. Settled by running the upstream `data.name = "demand"` pipeline
+(no MAR machinery — `NMMR_Trainer_DemandExperiment`, `generate_train_demand_pv`)
+at the same (Z=1, W=1, n=5000, 100 reps) point on both test grids, and
+comparing per-rep predictions to our `oracle_baseline`.
+
+To make the [22, 36] view possible from the upstream pipeline, extended
+`generate_test_demand_pv` to accept the same `test_a_min/max/n_grid` knobs
+already supported by the MAR version.
+
+**Configs.** [`configs/mar_pci_configs/upstream_demand_oos.json`](configs/mar_pci_configs/upstream_demand_oos.json)
+and `upstream_demand_is.json`. Same hyperparameters as our placeholder oracle
+(n_epochs=30, batch_size=1000, lr=3e-3, l2=3e-6, U-statistic, MLP 4×80).
+
+**Result. Byte-identical match across all 100 reps and all 10 grid points
+in both views:**
+
+| | OOS [10, 30] |  | IS [22, 36] |  |
+|---|---:|---:|---:|---:|
+| | upstream | oracle_baseline (MAR) | upstream | oracle_baseline_insupport |
+| MSE_mean    | 60.40   | 60.40   | 19.45   | 19.45   |
+| bias_mean   | +0.481  | +0.481  | −4.074  | −4.074  |
+| max abs diff per (rep, a) | — | **0.0000** | — | **0.0000** |
+
+The two pipelines produce identical predictions modulo floating-point — as
+expected from the structural argument: under δ ≡ 1 the MAR wrapper changes
+nothing observable about training (it just ignores `delta_w`). The fact that
+this holds *byte-identically* over 1000 (rep, a) pairs is a strong sanity
+check that the data generation, RNG seeding, trainer dispatch, and predict
+plug-in are all carried through faithfully.
+
+**Conclusion. The systematic bias structure — overshoot at low a (+17 at
+a=10), undershoot at mid/high a (−5 at a=27), monotone-decreasing fit that
+misses the structural curve's peak at a≈16.7 — is upstream NMMR-U behavior
+on this DGP at the upstream hyperparameters.** It is *not* introduced by
+the MAR extension, the §4.4 plug-in, or any choice we made.
+
+**What this changes about Part B's interpretation.**
+- The `modified` role's IS [22, 36] win (MSE 6.84 vs oracle 19.45) is a
+  legitimate bias-correction story: the §4.4 plug-in *partially* corrects
+  the upstream NMMR-U fit's curvature mismatch, not just the missingness.
+- The `oracle_baseline` ≈ `oracle_modified` agreement at the IS bias of
+  −4 is now firmly attributed to a shared *upstream* fit pathology rather
+  than a shared *training-pipeline* pathology.
+- The remaining open question is no longer "is our MAR pipeline buggy" —
+  it is "why does upstream NMMR-U miss the peak at this DGP/scale". This
+  is a question about the upstream method, not our extension.
+
+**Followups.**
+- [ ] Bandwidth sweep on the U-statistic kernel (`length_scale ∈ {1, 2, 5,
+      10}` or median-heuristic on (A, Z) raw space) — leading suspect for
+      the missed peak. Run on upstream `demand` since it's the same fit.
+- [ ] Optionally: input standardisation of (A, W, Z) before training. Other
+      NMMR-style codebases standardise; ours doesn't.
+- [ ] **Independent of the bias question:** patch the off-by-one ReLU bug
+      in `MLP_for_NMMR.forward` (output layer applies ReLU because
+      `ix == network_depth + 1` is never true; should be `ix == network_depth`).
+      Verified empirically the fix doesn't change the bias on this DGP, but
+      the constraint h(W, A) ≥ 0 is unintended and could bite on other DGPs.
+
+**Code change for this entry.**
+- `src/data/ate/demand_pv.py` — `generate_test_demand_pv` now accepts
+  `test_a_min/max/n_grid` (kwargs default to upstream behavior, [10, 30] × 10).
+
+**Dump directories.**
+- `dumps/nmmr_04-28-17-21-37/` — upstream demand at [10, 30]
+- `dumps/nmmr_04-28-17-30-41/` — upstream demand at [22, 36]
+
+---
+
+## Consistency investigation — moved out
+
+The consistency-theorem experiments (sample-size sweep at fixed schedule,
+paper-schedule rerun with growing-network, theoretical analysis of NMMR
+Theorem 1's d_k² approximation-error term) have been parked in a separate
+file: [`CONSISTENCY_INVESTIGATION.md`](CONSISTENCY_INVESTIGATION.md).
+
+Status: parked pending audit of the bias-evaluation pipeline. Issues with
+the prior conclusions are not yet explained. See the new file's header for
+the audit checklist and open followups.
