@@ -1,3 +1,10 @@
+# Global preferences
+
+1. Do not do extra things not required.
+2. Use Chinese as primary communication (even if user uses English with you), but keep keywords or professional expressions as they were.
+3. When you try to explain current situation, or demonstrate your judgement, or propose any next step or plan to me to get my decision, try to use simple language and first-principle logic if you can.
+
+
 # MAR-NMMR — implementation notes
 
 This repo is the upstream NMMR codebase (Kremer et al.) extended for the MAR-PCI series. The MAR extension follows §4.4 of Wen Zhou's working paper (`/Users/apple/2602_WenPaper/PCI_paper_draft_overleaf`). Sister implementations live at `/Users/apple/DeepFeatureProxyVariable` (DFPV) and `/Users/apple/DeepGMM` (DeepGMM).

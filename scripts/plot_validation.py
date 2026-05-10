@@ -150,6 +150,66 @@ def plot_ate_curves(by_role: dict, treats: np.ndarray, struct: np.ndarray,
     plt.style.use("default")
 
 
+def plot_per_a_boxplots(by_role: dict, treats: np.ndarray, struct: np.ndarray,
+                        out_path: Path, title_suffix: str):
+    """Per-a boxplots of bias β̂(a) − β(a): full distribution across reps.
+
+    Side-by-side boxes per role at each treatment value. Complementary to
+    `plot_bias_per_treatment` (mean ± std): shows medians, IQR, whiskers,
+    and outliers — useful when a role's bias distribution is skewed or
+    multi-modal at specific a (e.g. one rep landing far from the others).
+    Mirrors the DeepGMM helper `_plot_per_a_boxplots` in run_pci_compare.py.
+    """
+    plt.style.use("ggplot")
+    roles = ordered_roles(by_role)
+    extras_index = {r: i for i, r in enumerate(r for r in roles if r not in ROLE_COLORS)}
+
+    n_methods = max(len(roles), 1)
+    group_w = 0.82
+    box_w = group_w / n_methods
+    offsets = np.linspace(-group_w / 2 + box_w / 2,
+                          +group_w / 2 - box_w / 2, n_methods)
+
+    fig, ax = plt.subplots(figsize=(13, 5.6))
+    legend_handles = []
+    for mi, role in enumerate(roles):
+        preds = by_role[role]["preds"]            # (n_rep, n_grid)
+        bias = preds - struct                     # (n_rep, n_grid)
+        c = color_for(role, extras_index)
+        positions = np.arange(len(treats)) + offsets[mi]
+        ax.boxplot(
+            [bias[:, j] for j in range(len(treats))],
+            positions=positions,
+            widths=box_w * 0.9,
+            patch_artist=True,
+            boxprops=dict(facecolor=c, alpha=0.55, edgecolor=c),
+            medianprops=dict(color="black", linewidth=1.4),
+            whiskerprops=dict(color=c),
+            capprops=dict(color=c),
+            flierprops=dict(marker="o", markersize=2.5,
+                            markerfacecolor=c, markeredgecolor=c, alpha=0.45),
+            showfliers=True,
+            manage_ticks=False,
+        )
+        legend_handles.append(
+            plt.Rectangle((0, 0), 1, 1, facecolor=c, alpha=0.55,
+                          edgecolor=c, label=role)
+        )
+
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0)
+    ax.set_xticks(np.arange(len(treats)))
+    ax.set_xticklabels([f"{a:.2f}" for a in treats])
+    ax.set_xlim(-0.5, len(treats) - 0.5)
+    ax.set_xlabel("treatment a")
+    ax.set_ylabel(r"bias  $\hat\beta(a) - \beta(a)$")
+    ax.set_title(f"Per-a bias distribution (boxplot across reps){title_suffix}")
+    ax.legend(handles=legend_handles, title="role", loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+    plt.style.use("default")
+
+
 def plot_bias_per_treatment(by_role: dict, treats: np.ndarray, struct: np.ndarray,
                             out_path: Path, title_suffix: str):
     """Per-a bias curves: shows where each role's systematic error concentrates.
@@ -231,6 +291,8 @@ def main():
                     args.title_suffix)
     plot_bias_per_treatment(by_role, treats, struct, args.out / "bias_per_treatment.png",
                             args.title_suffix)
+    plot_per_a_boxplots(by_role, treats, struct, args.out / "bias_per_treatment_box.png",
+                        args.title_suffix)
     print_summary(by_role, treats, struct, label=args.title_suffix.strip() or "summary")
     print(f"\nWrote plots to: {args.out}/")
 

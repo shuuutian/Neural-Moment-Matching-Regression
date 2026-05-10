@@ -2,6 +2,8 @@ import os.path as op
 from typing import Optional, Dict, Any
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch.optim as optim
@@ -263,6 +265,10 @@ class NMMR_Trainer_DemandMARExperiment(object):
         self.batch_size = train_params['batch_size']
         self.gpu_flg = torch.cuda.is_available()
         self.log_metrics = train_params['log_metrics'] == "True"
+        # log_history persists per-epoch causal_train/val losses + observed-MSE
+        # to <dump_folder>/<random_seed>.history.csv. Independent of log_metrics
+        # (which gates tensorboard) so it works under the parallel rep loop too.
+        self.log_history = train_params.get('log_history', "False") == "True"
         self.l2_penalty = train_params['l2_penalty']
         self.learning_rate = train_params['learning_rate']
         self.loss_name = train_params['loss_name']
@@ -270,6 +276,7 @@ class NMMR_Trainer_DemandMARExperiment(object):
         self.n_folds = int(train_params.get('n_folds', 5))
         self.mar_bandwidth = train_params.get('mar_bandwidth', None)  # None -> median heuristic
         self.random_seed = random_seed
+        self.dump_folder = dump_folder
 
         # Populated by _train_mar_modified, consumed by _predict_mar (Pass 3).
         self._mar_train_cache: Optional[PVTrainDataSetMARTorch] = None
@@ -277,10 +284,14 @@ class NMMR_Trainer_DemandMARExperiment(object):
 
         self.mse_loss = nn.MSELoss()
 
+        # Per-epoch metric buffers — populated whenever log_metrics OR log_history.
+        self.causal_train_losses: list = []
+        self.causal_val_losses: list = []
+        self.obs_mse_train: list = []
+        self.obs_mse_val: list = []
+
         if self.log_metrics:
             self.writer = SummaryWriter(log_dir=op.join(dump_folder, f"tensorboard_log_{random_seed}"))
-            self.causal_train_losses = []
-            self.causal_val_losses = []
 
     def compute_kernel(self, kernel_inputs):
         return calculate_kernel_matrix(kernel_inputs)
@@ -326,9 +337,10 @@ class NMMR_Trainer_DemandMARExperiment(object):
                 causal_loss_train.backward()
                 optimizer.step()
 
-            if self.log_metrics:
+            if self.log_metrics or self.log_history:
                 self._log_epoch_metrics(model, train_t, val_t, epoch, mar_weights=None)
 
+        self._persist_history()
         return model
 
     def _train_mar_modified(self, model, optimizer, train_t: PVTrainDataSetMARTorch,
@@ -372,9 +384,10 @@ class NMMR_Trainer_DemandMARExperiment(object):
             causal_loss_train.backward()
             optimizer.step()
 
-            if self.log_metrics:
+            if self.log_metrics or self.log_history:
                 self._log_epoch_metrics(model, train_t, val_t, epoch, mar_weights=mar_weights)
 
+        self._persist_history()
         return model
 
     def _log_epoch_metrics(self, model, train_t, val_t, epoch, mar_weights):
@@ -389,8 +402,6 @@ class NMMR_Trainer_DemandMARExperiment(object):
 
             mse_train = self.mse_loss(preds_train, train_t.outcome)
             mse_val = self.mse_loss(preds_val, val_t.outcome)
-            self.writer.add_scalar('obs_MSE/train', mse_train, epoch)
-            self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
 
             if mar_weights is None:
                 causal_loss_train = NMMR_loss(preds_train, train_t.outcome, kernel_matrix_train, self.loss_name)
@@ -401,10 +412,35 @@ class NMMR_Trainer_DemandMARExperiment(object):
                 )
             # val: no MAR imputation needed for diagnostic logging (val data is just used for ATE plug-in).
             causal_loss_val = NMMR_loss(preds_val, val_t.outcome, kernel_matrix_val, self.loss_name)
-            self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train, epoch)
-            self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val, epoch)
-            self.causal_train_losses.append(causal_loss_train)
-            self.causal_val_losses.append(causal_loss_val)
+
+            if self.log_metrics:
+                self.writer.add_scalar('obs_MSE/train', mse_train, epoch)
+                self.writer.add_scalar('obs_MSE/val', mse_val, epoch)
+                self.writer.add_scalar(f'{self.loss_name}/train', causal_loss_train, epoch)
+                self.writer.add_scalar(f'{self.loss_name}/val', causal_loss_val, epoch)
+
+            self.causal_train_losses.append(float(causal_loss_train.item()))
+            self.causal_val_losses.append(float(causal_loss_val.item()))
+            self.obs_mse_train.append(float(mse_train.item()))
+            self.obs_mse_val.append(float(mse_val.item()))
+
+    def _persist_history(self):
+        """Write per-epoch loss history to <dump_folder>/<random_seed>.history.csv.
+
+        Called at the end of train(). Skipped when log_history is False or when
+        no metrics were collected (e.g. dump_folder unset in unit tests).
+        """
+        if not self.log_history or not self.causal_train_losses or self.dump_folder is None:
+            return
+        df = pd.DataFrame({
+            'epoch': np.arange(len(self.causal_train_losses), dtype=int),
+            'causal_loss_train': self.causal_train_losses,
+            'causal_loss_val': self.causal_val_losses,
+            'obs_mse_train': self.obs_mse_train,
+            'obs_mse_val': self.obs_mse_val,
+        })
+        out_path = Path(self.dump_folder) / f"{self.random_seed}.history.csv"
+        df.to_csv(out_path, index=False)
 
     def predict(self, model, test_data_t: PVTestDataSetTorch, val_data_t: PVTrainDataSetMARTorch):
         if self.use_mar_modified:

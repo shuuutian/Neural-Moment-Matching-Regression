@@ -14,13 +14,19 @@ SRC_DIR = Path.cwd().joinpath('src')
 
 @click.group()
 @click.argument('config_path', type=click.Path(exists=True))
+@click.option('--dump-tag', default=None, type=str,
+              help="Optional suffix appended to the dump folder name (e.g. "
+                   "'modified_5x'). Lets parallel sbatch jobs avoid timestamp "
+                   "collisions and makes the role+config readable from `ls`.")
 @click.pass_context
-def main(ctx, config_path):
+def main(ctx, config_path, dump_tag):
     with open(config_path) as f:
         config = json.load(f)
 
     model_name = config['model']['name']
     foldername = str(datetime.datetime.now().strftime("%m-%d-%H-%M-%S"))
+    if dump_tag:
+        foldername = f"{foldername}__{dump_tag}"
     dump_dir = DUMP_DIR.joinpath(model_name + "_" + foldername)
     os.mkdir(dump_dir)
 
