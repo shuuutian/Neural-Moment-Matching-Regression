@@ -1,0 +1,25 @@
+{
+    "n_repeat": 100,
+    "data": {
+        "name": "demand_mar",
+        "n_sample": 5000,
+        "mode": "mar_modified",
+        "missing_rate": 0.3,
+        "Z_noise": 1,
+        "W_noise": 1
+    },
+    "model": {
+        "name": "nmmr",
+        "n_epochs": 3000,
+        "batch_size": 5000,
+        "n_folds": 5,
+        "log_metrics": "False",
+        "log_history": "True",
+        "learning_rate": 0.003,
+        "l2_penalty": 3e-06,
+        "loss_name": "U_statistic",
+        "network_depth": 4,
+        "network_width": 80,
+        "use_mar_modified": true
+    }
+}
